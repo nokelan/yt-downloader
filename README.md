@@ -1,7 +1,5 @@
 # YouTube Downloader
 
-> AI로 30분 만에 만든 유튜브 다운로더
-
 Python + yt-dlp + tkinter로 만든 심플한 유튜브 다운로드 앱입니다.
 설치 없이 exe 파일 하나만 받으면 바로 쓸 수 있습니다.
 
