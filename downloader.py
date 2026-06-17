@@ -59,15 +59,21 @@ class YtdlpRunner(threading.Thread):
         self.cancel_event = cancel_event
         print(f"[DEBUG] YtdlpRunner 생성: format={config.format}, quality={config.quality}, url={config.url[:60]}")
 
-    # ── FFmpeg 경로 탐색 (PyInstaller 번들 대응) ──────────────
+    # ── FFmpeg 경로 탐색 ──────────────────────────────────────
     @staticmethod
     def _get_ffmpeg_path() -> Optional[str]:
         if getattr(sys, 'frozen', False):
-            # PyInstaller .exe로 실행 중
-            ffmpeg_path = os.path.join(sys._MEIPASS, 'ffmpeg')
-            print(f"[DEBUG] 번들 FFmpeg 경로: {ffmpeg_path}")
-            return ffmpeg_path
-        # 개발 환경: PATH에서 탐색
+            # 1순위: PyInstaller 번들 내부 (onefile 빌드 시)
+            bundle_path = os.path.join(sys._MEIPASS, 'ffmpeg')
+            if os.path.exists(os.path.join(bundle_path, 'ffmpeg.exe')):
+                print(f"[DEBUG] 번들 FFmpeg 사용: {bundle_path}")
+                return bundle_path
+            # 2순위: EXE 파일 옆 ffmpeg.exe
+            exe_dir = str(Path(sys.executable).parent)
+            if os.path.exists(os.path.join(exe_dir, 'ffmpeg.exe')):
+                print(f"[DEBUG] EXE 옆 FFmpeg 사용: {exe_dir}")
+                return exe_dir
+        # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
         return None
 
     # ── yt-dlp 옵션 딕셔너리 생성 ─────────────────────────────
@@ -269,17 +275,36 @@ class MainWindow:
 
     # ── FFmpeg 감지 ────────────────────────────────────────────
     def _check_ffmpeg(self) -> bool:
-        found = shutil.which("ffmpeg") is not None
-        print(f"[DEBUG] FFmpeg 감지: {'있음' if found else '없음'}")
-        if not found:
-            messagebox.showwarning(
-                "FFmpeg 미설치",
-                "FFmpeg가 설치되어 있지 않습니다.\n\n"
-                "MP3 변환 및 MP4 병합에 FFmpeg가 필요합니다.\n"
-                "https://ffmpeg.org/download.html 에서 설치 후 재시작하세요.\n\n"
-                "※ 설치 후 시스템 PATH에 ffmpeg.exe 경로를 추가해야 합니다."
-            )
-        return found
+        # PATH 확인
+        if shutil.which("ffmpeg") is not None:
+            print("[DEBUG] FFmpeg 감지: PATH에 있음")
+            return True
+        # 번들/EXE 옆 확인
+        ffmpeg_loc = self._get_ffmpeg_path()
+        if ffmpeg_loc and os.path.exists(os.path.join(ffmpeg_loc, 'ffmpeg.exe')):
+            print(f"[DEBUG] FFmpeg 감지: {ffmpeg_loc}")
+            return True
+        # EXE 옆 직접 확인 (frozen 여부 무관)
+        if getattr(sys, 'frozen', False):
+            exe_dir = Path(sys.executable).parent
+        else:
+            exe_dir = Path(__file__).parent
+        if (exe_dir / 'ffmpeg.exe').exists():
+            print(f"[DEBUG] FFmpeg 감지: EXE 옆 {exe_dir}")
+            return True
+
+        print("[DEBUG] FFmpeg 없음")
+        messagebox.showwarning(
+            "FFmpeg 미설치",
+            "FFmpeg가 설치되어 있지 않습니다.\n\n"
+            "MP3 변환 및 MP4 병합에 FFmpeg가 필요합니다.\n\n"
+            "해결 방법 (택 1):\n"
+            "① YTDownloader.exe 와 같은 폴더에 ffmpeg.exe 를 복사\n"
+            "② https://github.com/BtbN/FFmpeg-Builds/releases 에서\n"
+            "   ffmpeg-master-latest-win64-gpl.zip 다운로드 후 bin\\ffmpeg.exe 복사\n\n"
+            "복사 후 재시작하세요."
+        )
+        return False
 
     # ── UI 구성 ────────────────────────────────────────────────
     def _build_ui(self):

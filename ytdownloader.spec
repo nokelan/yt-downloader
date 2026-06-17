@@ -1,12 +1,22 @@
 # PyInstaller spec — YouTube Downloader
 # 사용법: pyinstaller ytdownloader.spec
+#
+# ffmpeg 번들 방법 (선택):
+#   ffmpeg.exe를 src/ 폴더에 복사 후 빌드하면 EXE 내부에 번들됨 (~240MB)
+#   번들하지 않으면 YTDownloader.exe 옆에 ffmpeg.exe를 두면 됨
+
+import os
 
 block_cipher = None
+
+# ffmpeg.exe가 src/ 폴더에 있으면 번들에 포함
+_ffmpeg_src = os.path.join(SPECPATH, 'ffmpeg.exe')
+_ffmpeg_binaries = [(_ffmpeg_src, 'ffmpeg')] if os.path.exists(_ffmpeg_src) else []
 
 a = Analysis(
     ['downloader.py'],
     pathex=[],
-    binaries=[],
+    binaries=_ffmpeg_binaries,
     datas=[],
     hiddenimports=[
         'yt_dlp',
@@ -45,5 +55,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,          # 아이콘 파일 경로 지정 시: icon='icon.ico'
+    icon=None,
 )
