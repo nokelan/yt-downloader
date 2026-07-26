@@ -41,6 +41,26 @@ class DownloadConfig:
 
 
 # ─────────────────────────────────────────────
+# FFmpeg 경로 탐색 (모듈 레벨 — YtdlpRunner/MainWindow 공용)
+# ─────────────────────────────────────────────
+
+def _get_ffmpeg_path() -> Optional[str]:
+    if getattr(sys, 'frozen', False):
+        # 1순위: PyInstaller 번들 내부 (onefile 빌드 시)
+        bundle_path = os.path.join(sys._MEIPASS, 'ffmpeg')
+        if os.path.exists(os.path.join(bundle_path, 'ffmpeg.exe')):
+            print(f"[DEBUG] 번들 FFmpeg 사용: {bundle_path}")
+            return bundle_path
+        # 2순위: EXE 파일 옆 ffmpeg.exe
+        exe_dir = str(Path(sys.executable).parent)
+        if os.path.exists(os.path.join(exe_dir, 'ffmpeg.exe')):
+            print(f"[DEBUG] EXE 옆 FFmpeg 사용: {exe_dir}")
+            return exe_dir
+    # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
+    return None
+
+
+# ─────────────────────────────────────────────
 # 2. YtdlpRunner (Thread 서브클래스)
 # ─────────────────────────────────────────────
 
@@ -59,29 +79,12 @@ class YtdlpRunner(threading.Thread):
         self.cancel_event = cancel_event
         print(f"[DEBUG] YtdlpRunner 생성: format={config.format}, quality={config.quality}, url={config.url[:60]}")
 
-    # ── FFmpeg 경로 탐색 ──────────────────────────────────────
-    @staticmethod
-    def _get_ffmpeg_path() -> Optional[str]:
-        if getattr(sys, 'frozen', False):
-            # 1순위: PyInstaller 번들 내부 (onefile 빌드 시)
-            bundle_path = os.path.join(sys._MEIPASS, 'ffmpeg')
-            if os.path.exists(os.path.join(bundle_path, 'ffmpeg.exe')):
-                print(f"[DEBUG] 번들 FFmpeg 사용: {bundle_path}")
-                return bundle_path
-            # 2순위: EXE 파일 옆 ffmpeg.exe
-            exe_dir = str(Path(sys.executable).parent)
-            if os.path.exists(os.path.join(exe_dir, 'ffmpeg.exe')):
-                print(f"[DEBUG] EXE 옆 FFmpeg 사용: {exe_dir}")
-                return exe_dir
-        # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
-        return None
-
     # ── yt-dlp 옵션 딕셔너리 생성 ─────────────────────────────
     def build_options(self) -> dict:
         cfg = self.config
         fmt = cfg.format
         qty = cfg.quality
-        ffmpeg_loc = self._get_ffmpeg_path()
+        ffmpeg_loc = _get_ffmpeg_path()
 
         # 포맷별 기본 옵션
         if fmt == "mp3":
@@ -280,7 +283,7 @@ class MainWindow:
             print("[DEBUG] FFmpeg 감지: PATH에 있음")
             return True
         # 번들/EXE 옆 확인
-        ffmpeg_loc = self._get_ffmpeg_path()
+        ffmpeg_loc = _get_ffmpeg_path()
         if ffmpeg_loc and os.path.exists(os.path.join(ffmpeg_loc, 'ffmpeg.exe')):
             print(f"[DEBUG] FFmpeg 감지: {ffmpeg_loc}")
             return True
