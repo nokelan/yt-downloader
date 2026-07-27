@@ -6,6 +6,7 @@
 #   번들하지 않으면 YTDownloader.exe 옆에 ffmpeg.exe를 두면 됨
 
 import os
+import certifi
 
 block_cipher = None
 
@@ -13,11 +14,14 @@ block_cipher = None
 _ffmpeg_src = os.path.join(SPECPATH, 'ffmpeg.exe')
 _ffmpeg_binaries = [(_ffmpeg_src, 'ffmpeg')] if os.path.exists(_ffmpeg_src) else []
 
+# certifi의 cacert.pem을 번들에 포함 — 없으면 다른 PC에서 SSL 인증서 검증 실패
+_datas = [(certifi.where(), '.')]
+
 a = Analysis(
     ['downloader.py'],
     pathex=[],
     binaries=_ffmpeg_binaries,
-    datas=[],
+    datas=_datas,
     hiddenimports=[
         'yt_dlp',
         'yt_dlp.extractor',

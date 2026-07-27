@@ -15,6 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+if getattr(sys, "frozen", False):
+    # PyInstaller onefile 빌드는 certifi의 cacert.pem을 못 찾아 SSL 인증서
+    # 검증에 실패한다 (다른 PC에서 CERTIFICATE_VERIFY_FAILED 발생 원인).
+    _cacert = os.path.join(sys._MEIPASS, "cacert.pem")
+    if os.path.exists(_cacert):
+        os.environ["SSL_CERT_FILE"] = _cacert
+        os.environ["REQUESTS_CA_BUNDLE"] = _cacert
+
 try:
     import yt_dlp
     print("[DEBUG] yt_dlp import 성공:", yt_dlp.version.__version__)
