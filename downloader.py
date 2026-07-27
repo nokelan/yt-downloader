@@ -9,18 +9,57 @@ import os
 import shutil
 import queue
 import threading
+import traceback
+import urllib.request
+import urllib.parse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
+
+TELEGRAM_BOT_TOKEN = "8674711585:AAGIXKm4tKLlsiAppgfLGdAYSFr_VC0VVUo"
+TELEGRAM_CHAT_ID = "7525127402"
+
+# console=False 빌드라 print()가 배포판에서 어디에도 안 남는 문제 대응 —
+# 파일 기반 로그로 대체. LOCALAPPDATA는 제한된 환경에서도 쓰기 권한이 보장됨.
+LOG_FILE = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "YTDownloader", "debug.log"
+)
+
+_DIAG = {"app_version": APP_VERSION, "frozen": getattr(sys, "frozen", False)}
+
+
+def _log(msg: str):
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _notify_telegram(text: str):
+    """오류 발생 시 진단 정보를 텔레그램으로 전송 (실패해도 앱 동작에 영향 없음)"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        _log(f"텔레그램 알림 전송 실패: {e}")
+
 
 if getattr(sys, "frozen", False):
     # PyInstaller onefile 빌드는 certifi의 cacert.pem을 못 찾아 SSL 인증서
     # 검증에 실패한다 (다른 PC에서 CERTIFICATE_VERIFY_FAILED 발생 원인).
+    _DIAG["meipass"] = sys._MEIPASS
     _cacert = os.path.join(sys._MEIPASS, "cacert.pem")
+    _DIAG["cacert_in_meipass"] = os.path.exists(_cacert)
     if os.path.exists(_cacert):
         # sys._MEIPASS 경로(사용자 계정명 포함)에 한글 등 비ASCII 문자가 있으면
         # yt_dlp가 쓰는 curl_cffi(libcurl 바인딩)가 CA 파일을 열지 못해
@@ -32,15 +71,19 @@ if getattr(sys, "frozen", False):
             )
             shutil.copyfile(_cacert, _cacert_ascii)
             _cacert = _cacert_ascii
-        except OSError:
-            pass
+            _DIAG["cacert_copy_ok"] = True
+        except OSError as e:
+            _DIAG["cacert_copy_ok"] = False
+            _DIAG["cacert_copy_error"] = str(e)
         os.environ["SSL_CERT_FILE"] = _cacert
         os.environ["REQUESTS_CA_BUNDLE"] = _cacert
         os.environ["CURL_CA_BUNDLE"] = _cacert
+    _DIAG["ssl_cert_file"] = os.environ.get("SSL_CERT_FILE")
+    _log(f"진단 정보: {_DIAG}")
 
 try:
     import yt_dlp
-    print("[DEBUG] yt_dlp import 성공:", yt_dlp.version.__version__)
+    _log(f"[DEBUG] yt_dlp import 성공: {yt_dlp.version.__version__}")
 except ImportError:
     messagebox.showerror(
         "모듈 누락",
@@ -72,12 +115,12 @@ def _get_ffmpeg_path() -> Optional[str]:
         # 1순위: PyInstaller 번들 내부 (onefile 빌드 시)
         bundle_path = os.path.join(sys._MEIPASS, 'ffmpeg')
         if os.path.exists(os.path.join(bundle_path, 'ffmpeg.exe')):
-            print(f"[DEBUG] 번들 FFmpeg 사용: {bundle_path}")
+            _log(f"번들 FFmpeg 사용: {bundle_path}")
             return bundle_path
         # 2순위: EXE 파일 옆 ffmpeg.exe
         exe_dir = str(Path(sys.executable).parent)
         if os.path.exists(os.path.join(exe_dir, 'ffmpeg.exe')):
-            print(f"[DEBUG] EXE 옆 FFmpeg 사용: {exe_dir}")
+            _log(f"EXE 옆 FFmpeg 사용: {exe_dir}")
             return exe_dir
     # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
     return None
@@ -100,7 +143,7 @@ class YtdlpRunner(threading.Thread):
         self.config = config
         self.queue = result_queue
         self.cancel_event = cancel_event
-        print(f"[DEBUG] YtdlpRunner 생성: format={config.format}, quality={config.quality}, url={config.url[:60]}")
+        _log(f"YtdlpRunner 생성: format={config.format}, quality={config.quality}, url={config.url[:60]}")
 
     # ── yt-dlp 옵션 딕셔너리 생성 ─────────────────────────────
     def build_options(self) -> dict:
@@ -154,14 +197,14 @@ class YtdlpRunner(threading.Thread):
             "ignoreerrors": False,
         })
 
-        print(f"[DEBUG] build_options: {opts}")
+        _log(f"build_options: {opts}")
         return opts
 
     # ── 진행률 콜백 → Queue push ───────────────────────────────
     def _progress_hook(self, d: dict):
         # 취소 신호 확인
         if self.cancel_event.is_set():
-            print("[DEBUG] 취소 이벤트 감지 — DownloadCancelled raise")
+            _log("취소 이벤트 감지 — DownloadCancelled raise")
             raise yt_dlp.utils.DownloadCancelled("사용자 취소")
 
         status = d.get("status")
@@ -188,7 +231,7 @@ class YtdlpRunner(threading.Thread):
 
         elif status == "finished":
             filename = d.get("filename", "")
-            print(f"[DEBUG] 다운로드 finished: {filename}")
+            _log(f"다운로드 finished: {filename}")
             # 후처리(FFmpeg) 진행 중 상태 표시
             self.queue.put({
                 "type": "progress",
@@ -200,7 +243,7 @@ class YtdlpRunner(threading.Thread):
 
     # ── Thread 본체 ───────────────────────────────────────────
     def run(self):
-        print(f"[DEBUG] YtdlpRunner.run() 시작 — URL: {self.config.url}")
+        _log(f"YtdlpRunner.run() 시작 — URL: {self.config.url}")
         try:
             opts = self.build_options()
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -217,7 +260,7 @@ class YtdlpRunner(threading.Thread):
             filesize_bytes = info.get("filesize") or info.get("filesize_approx") or 0
             size_mb = filesize_bytes / (1024 * 1024) if filesize_bytes else 0.0
 
-            print(f"[DEBUG] 다운로드 완료: {filename} ({size_mb:.1f} MB)")
+            _log(f"다운로드 완료: {filename} ({size_mb:.1f} MB)")
             self.queue.put({
                 "type": "done",
                 "filename": filename,
@@ -225,17 +268,23 @@ class YtdlpRunner(threading.Thread):
             })
 
         except yt_dlp.utils.DownloadCancelled:
-            print("[DEBUG] DownloadCancelled — 취소 완료")
+            _log("DownloadCancelled — 취소 완료")
             self.queue.put({"type": "cancelled"})
 
         except yt_dlp.utils.DownloadError as e:
             msg = str(e)
-            print(f"[DEBUG] DownloadError: {msg}")
+            _log(f"DownloadError: {msg}")
+            _notify_telegram(
+                f"[YTDownloader v{APP_VERSION}] DownloadError\n{msg}\n진단: {_DIAG}"
+            )
             self.queue.put({"type": "error", "message": msg})
 
         except Exception as e:
             msg = str(e)
-            print(f"[DEBUG] 예외 발생: {type(e).__name__}: {msg}")
+            _log(f"예외 발생: {type(e).__name__}: {msg}\n{traceback.format_exc()}")
+            _notify_telegram(
+                f"[YTDownloader v{APP_VERSION}] {type(e).__name__}: {msg}\n진단: {_DIAG}"
+            )
             self.queue.put({"type": "error", "message": msg})
 
 
@@ -294,25 +343,25 @@ class MainWindow:
         # 초기 상태 적용
         self._set_state(self.STATE_IDLE)
 
-        print("[DEBUG] MainWindow 초기화 완료")
+        _log("MainWindow 초기화 완료")
 
     GITHUB_URL = "https://github.com/nokelan/yt-downloader"
 
     def _open_github(self):
         import webbrowser
         webbrowser.open(self.GITHUB_URL)
-        print(f"[DEBUG] GitHub 열기: {self.GITHUB_URL}")
+        _log(f"GitHub 열기: {self.GITHUB_URL}")
 
     # ── FFmpeg 감지 ────────────────────────────────────────────
     def _check_ffmpeg(self) -> bool:
         # PATH 확인
         if shutil.which("ffmpeg") is not None:
-            print("[DEBUG] FFmpeg 감지: PATH에 있음")
+            _log("FFmpeg 감지: PATH에 있음")
             return True
         # 번들/EXE 옆 확인
         ffmpeg_loc = _get_ffmpeg_path()
         if ffmpeg_loc and os.path.exists(os.path.join(ffmpeg_loc, 'ffmpeg.exe')):
-            print(f"[DEBUG] FFmpeg 감지: {ffmpeg_loc}")
+            _log(f"FFmpeg 감지: {ffmpeg_loc}")
             return True
         # EXE 옆 직접 확인 (frozen 여부 무관)
         if getattr(sys, 'frozen', False):
@@ -320,10 +369,10 @@ class MainWindow:
         else:
             exe_dir = Path(__file__).parent
         if (exe_dir / 'ffmpeg.exe').exists():
-            print(f"[DEBUG] FFmpeg 감지: EXE 옆 {exe_dir}")
+            _log(f"FFmpeg 감지: EXE 옆 {exe_dir}")
             return True
 
-        print("[DEBUG] FFmpeg 없음")
+        _log("FFmpeg 없음")
         messagebox.showwarning(
             "FFmpeg 미설치",
             "FFmpeg가 설치되어 있지 않습니다.\n\n"
@@ -479,7 +528,7 @@ class MainWindow:
         try:
             text = self.root.clipboard_get().strip()
             self.url_var.set(text)
-            print(f"[DEBUG] 붙여넣기: {text[:80]}")
+            _log(f"붙여넣기: {text[:80]}")
         except tk.TclError:
             messagebox.showinfo("클립보드", "클립보드에 내용이 없습니다.")
 
@@ -489,7 +538,7 @@ class MainWindow:
         self.quality_combo["values"] = options
         if options:
             self.quality_var.set(options[0])
-        print(f"[DEBUG] 포맷 변경: {fmt} → 품질 목록: {options}")
+        _log(f"포맷 변경: {fmt} → 품질 목록: {options}")
 
     def _on_browse(self):
         chosen = filedialog.askdirectory(
@@ -498,7 +547,7 @@ class MainWindow:
         )
         if chosen:
             self.save_dir_var.set(chosen)
-            print(f"[DEBUG] 저장 경로 변경: {chosen}")
+            _log(f"저장 경로 변경: {chosen}")
 
     def _on_start(self):
         url = self.url_var.get().strip()
@@ -533,7 +582,7 @@ class MainWindow:
             save_dir=save_dir,
             no_playlist=no_playlist,
         )
-        print(f"[DEBUG] 다운로드 시작 요청: {config}")
+        _log(f"다운로드 시작 요청: {config}")
 
         # 취소 이벤트 초기화
         self._cancel_event.clear()
@@ -545,7 +594,7 @@ class MainWindow:
         self._set_state(self.STATE_DOWNLOADING)
 
     def _on_cancel(self):
-        print("[DEBUG] 취소 버튼 클릭")
+        _log("취소 버튼 클릭")
         self._cancel_event.set()
         self._set_state(self.STATE_CANCELLING)
         self.status_label.config(text="취소 중... 잠시 기다려 주세요.")
@@ -555,7 +604,7 @@ class MainWindow:
         try:
             while True:
                 msg = self._queue.get_nowait()
-                print(f"[DEBUG] Queue 수신: {msg}")
+                _log(f"Queue 수신: {msg}")
                 self._handle_queue_msg(msg)
         except queue.Empty:
             pass
@@ -601,7 +650,7 @@ class MainWindow:
     # ── 상태 머신 ─────────────────────────────────────────────
     def _set_state(self, state: str):
         self._state = state
-        print(f"[DEBUG] 상태 전이 → {state}")
+        _log(f"상태 전이 → {state}")
 
         url_has_value = len(self.url_var.get().strip()) > 10
 
@@ -641,19 +690,26 @@ class MainWindow:
 # ─────────────────────────────────────────────
 
 def main():
-    print("[DEBUG] 앱 시작")
-    root = tk.Tk()
-
-    # 기본 스타일
-    style = ttk.Style()
+    _log("앱 시작")
     try:
-        style.theme_use("vista")
-    except tk.TclError:
-        style.theme_use("default")
+        root = tk.Tk()
 
-    app = MainWindow(root)
-    root.mainloop()
-    print("[DEBUG] 앱 종료")
+        # 기본 스타일
+        style = ttk.Style()
+        try:
+            style.theme_use("vista")
+        except tk.TclError:
+            style.theme_use("default")
+
+        app = MainWindow(root)
+        root.mainloop()
+        _log("앱 종료")
+    except Exception as e:
+        _log(f"치명적 오류: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        _notify_telegram(
+            f"[YTDownloader v{APP_VERSION}] 치명적 오류로 종료\n{type(e).__name__}: {e}\n진단: {_DIAG}"
+        )
+        raise
 
 
 if __name__ == "__main__":
