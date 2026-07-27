@@ -95,6 +95,10 @@ class YtdlpRunner(threading.Thread):
                     "preferredcodec": "mp3",
                     "preferredquality": qty,   # "192" or "320"
                 }],
+                # 영상마다 제각각인 음량을 EBU R128 기준(-16 LUFS)으로 통일
+                "postprocessor_args": {
+                    "extractaudio+ffmpeg": ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"],
+                },
             }
         elif fmt == "mp4" and qty == "1080":
             opts = {
