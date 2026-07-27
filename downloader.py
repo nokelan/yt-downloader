@@ -15,13 +15,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+APP_VERSION = "1.6"
+
 if getattr(sys, "frozen", False):
     # PyInstaller onefile 빌드는 certifi의 cacert.pem을 못 찾아 SSL 인증서
     # 검증에 실패한다 (다른 PC에서 CERTIFICATE_VERIFY_FAILED 발생 원인).
     _cacert = os.path.join(sys._MEIPASS, "cacert.pem")
     if os.path.exists(_cacert):
+        # sys._MEIPASS 경로(사용자 계정명 포함)에 한글 등 비ASCII 문자가 있으면
+        # yt_dlp가 쓰는 curl_cffi(libcurl 바인딩)가 CA 파일을 열지 못해
+        # SSL_CERT_FILE을 지정해도 인증서 검증이 실패할 수 있다. 계정명과
+        # 무관한 고정 ASCII 경로로 복사해 우회한다.
+        try:
+            _cacert_ascii = os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"), "Temp", "ytdownloader_cacert.pem"
+            )
+            shutil.copyfile(_cacert, _cacert_ascii)
+            _cacert = _cacert_ascii
+        except OSError:
+            pass
         os.environ["SSL_CERT_FILE"] = _cacert
         os.environ["REQUESTS_CA_BUNDLE"] = _cacert
+        os.environ["CURL_CA_BUNDLE"] = _cacert
 
 try:
     import yt_dlp
@@ -257,7 +272,7 @@ class MainWindow:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("YouTube Downloader")
+        self.root.title(f"YouTube Downloader v{APP_VERSION}")
         self.root.resizable(False, False)
         self.root.geometry("600x430")
 
@@ -329,7 +344,7 @@ class MainWindow:
         header = tk.Frame(self.root, bg="#2d2d2d", height=40)
         header.pack(fill="x")
         tk.Label(
-            header, text="YouTube Downloader",
+            header, text=f"YouTube Downloader v{APP_VERSION}",
             bg="#2d2d2d", fg="white",
             font=("Segoe UI", 13, "bold")
         ).pack(side="left", padx=12, pady=8)
