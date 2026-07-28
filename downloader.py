@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-APP_VERSION = "1.7"
+APP_VERSION = "1.9"
 
 # console=False 빌드라 print()가 배포판에서 어디에도 안 남는 문제 대응 —
 # 파일 기반 로그로 대체. LOCALAPPDATA는 제한된 환경에서도 쓰기 권한이 보장됨.
