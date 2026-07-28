@@ -10,8 +10,6 @@ import shutil
 import queue
 import threading
 import traceback
-import urllib.request
-import urllib.parse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from dataclasses import dataclass
@@ -20,9 +18,6 @@ from pathlib import Path
 from typing import Optional
 
 APP_VERSION = "1.7"
-
-TELEGRAM_BOT_TOKEN = "8674711585:AAGIXKm4tKLlsiAppgfLGdAYSFr_VC0VVUo"
-TELEGRAM_CHAT_ID = "7525127402"
 
 # console=False 빌드라 print()가 배포판에서 어디에도 안 남는 문제 대응 —
 # 파일 기반 로그로 대체. LOCALAPPDATA는 제한된 환경에서도 쓰기 권한이 보장됨.
@@ -41,17 +36,6 @@ def _log(msg: str):
             f.write(line + "\n")
     except OSError:
         pass
-
-
-def _notify_telegram(text: str):
-    """오류 발생 시 진단 정보를 텔레그램으로 전송 (실패해도 앱 동작에 영향 없음)"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode("utf-8")
-        req = urllib.request.Request(url, data=data)
-        urllib.request.urlopen(req, timeout=5)
-    except Exception as e:
-        _log(f"텔레그램 알림 전송 실패: {e}")
 
 
 if getattr(sys, "frozen", False):
@@ -274,17 +258,11 @@ class YtdlpRunner(threading.Thread):
         except yt_dlp.utils.DownloadError as e:
             msg = str(e)
             _log(f"DownloadError: {msg}")
-            _notify_telegram(
-                f"[YTDownloader v{APP_VERSION}] DownloadError\n{msg}\n진단: {_DIAG}"
-            )
             self.queue.put({"type": "error", "message": msg})
 
         except Exception as e:
             msg = str(e)
             _log(f"예외 발생: {type(e).__name__}: {msg}\n{traceback.format_exc()}")
-            _notify_telegram(
-                f"[YTDownloader v{APP_VERSION}] {type(e).__name__}: {msg}\n진단: {_DIAG}"
-            )
             self.queue.put({"type": "error", "message": msg})
 
 
@@ -706,9 +684,6 @@ def main():
         _log("앱 종료")
     except Exception as e:
         _log(f"치명적 오류: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-        _notify_telegram(
-            f"[YTDownloader v{APP_VERSION}] 치명적 오류로 종료\n{type(e).__name__}: {e}\n진단: {_DIAG}"
-        )
         raise
 
 
