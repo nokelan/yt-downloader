@@ -27,6 +27,7 @@ a = Analysis(
         'yt_dlp.extractor',
         'yt_dlp.postprocessor',
         'yt_dlp.utils',
+        'PIL._tkinter_finder',
     ],
     hookspath=[],
     hooksconfig={},

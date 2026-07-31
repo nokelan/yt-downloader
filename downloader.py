@@ -7,15 +7,21 @@ Python 3.x + tkinter + yt_dlp
 import sys
 import os
 import shutil
+import socket
 import queue
 import threading
 import traceback
+import http.server
+import urllib.parse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
+
+import qrcode
+from PIL import ImageTk
 
 APP_VERSION = "1.9"
 
@@ -108,6 +114,44 @@ def _get_ffmpeg_path() -> Optional[str]:
             return exe_dir
     # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
     return None
+
+
+# ─────────────────────────────────────────────
+# 폰 전송 서버 (로컬 HTTP + QR코드)
+# ─────────────────────────────────────────────
+
+def _get_lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+class _FileServeHandler(http.server.BaseHTTPRequestHandler):
+    """요청 경로와 무관하게 serve_path 파일 하나만 응답 — 저장 폴더 전체 노출 방지"""
+    serve_path: Optional[Path] = None
+
+    def do_GET(self):
+        path = self.serve_path
+        if path is None or not path.exists():
+            self.send_error(404)
+            return
+        size = path.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        quoted_name = urllib.parse.quote(path.name)
+        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quoted_name}")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile)
+
+    def log_message(self, format, *args):
+        _log(f"[전송서버] {format % args}")
 
 
 # ─────────────────────────────────────────────
@@ -241,6 +285,7 @@ class YtdlpRunner(threading.Thread):
             title = info.get("title", "알 수 없음")
             ext = "mp3" if self.config.format == "mp3" else "mp4"
             filename = f"{title}.{ext}"
+            filepath = self.config.save_dir / filename
             filesize_bytes = info.get("filesize") or info.get("filesize_approx") or 0
             size_mb = filesize_bytes / (1024 * 1024) if filesize_bytes else 0.0
 
@@ -248,6 +293,7 @@ class YtdlpRunner(threading.Thread):
             self.queue.put({
                 "type": "done",
                 "filename": filename,
+                "filepath": str(filepath),
                 "size_mb": size_mb,
             })
 
@@ -309,6 +355,11 @@ class MainWindow:
         self._cancel_event = threading.Event()
         self._runner: Optional[YtdlpRunner] = None
 
+        # 완료 목록 index → 실제 파일 경로 (폰 전송용)
+        self._listbox_paths: Dict[int, Path] = {}
+        self._transfer_server: Optional[http.server.ThreadingHTTPServer] = None
+        self._transfer_window: Optional[tk.Toplevel] = None
+
         # FFmpeg 체크
         self._ffmpeg_ok = self._check_ffmpeg()
 
@@ -321,7 +372,13 @@ class MainWindow:
         # 초기 상태 적용
         self._set_state(self.STATE_IDLE)
 
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
         _log("MainWindow 초기화 완료")
+
+    def _on_close(self):
+        self._stop_transfer_server()
+        self.root.destroy()
 
     GITHUB_URL = "https://github.com/nokelan/yt-downloader"
 
@@ -477,8 +534,13 @@ class MainWindow:
         ttk.Separator(content, orient="horizontal").pack(fill="x", pady=4)
 
         # ── 완료 목록 ──
-        tk.Label(content, text="완료 목록", bg="white", fg="#333333",
-                 font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x")
+        list_header = tk.Frame(content, bg="white")
+        list_header.pack(fill="x")
+        tk.Label(list_header, text="완료 목록", bg="white", fg="#333333",
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(side="left")
+        self.btn_send_phone = tk.Button(list_header, text="폰으로 보내기",
+                                        command=self._on_send_to_phone)
+        self.btn_send_phone.pack(side="right")
         list_frame = tk.Frame(content, bg="white")
         list_frame.pack(fill="both", expand=True, pady=(2, 0))
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
@@ -608,6 +670,7 @@ class MainWindow:
             if size_mb > 0:
                 entry += f"  ({size_mb:.1f} MB)"
             self.result_listbox.insert(tk.END, entry)
+            self._listbox_paths[self.result_listbox.size() - 1] = Path(msg.get("filepath", ""))
             self.result_listbox.see(tk.END)
             self._set_state(self.STATE_DONE)
 
@@ -624,6 +687,68 @@ class MainWindow:
             self.progress_bar["value"] = 0
             self.pct_label.config(text="0%")
             self._set_state(self.STATE_READY)
+
+    # ── 폰으로 보내기 ─────────────────────────────────────────
+    def _on_send_to_phone(self):
+        sel = self.result_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("폰으로 보내기", "완료 목록에서 파일을 먼저 선택하세요.")
+            return
+        path = self._listbox_paths.get(sel[0])
+        if path is None or not path.exists():
+            messagebox.showerror("폰으로 보내기", "파일을 찾을 수 없습니다. 이동/삭제되었을 수 있습니다.")
+            return
+
+        self._stop_transfer_server()
+
+        _FileServeHandler.serve_path = path
+        server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), _FileServeHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self._transfer_server = server
+
+        ip = _get_lan_ip()
+        port = server.server_address[1]
+        url = f"http://{ip}:{port}/{urllib.parse.quote(path.name)}"
+        _log(f"폰 전송 서버 시작: {url}")
+
+        self._show_transfer_window(path.name, url)
+
+    def _show_transfer_window(self, filename: str, url: str):
+        win = tk.Toplevel(self.root)
+        win.title("폰으로 보내기")
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_transfer_window(win))
+        self._transfer_window = win
+
+        tk.Label(win, text=filename, font=("Segoe UI", 9, "bold"),
+                 wraplength=320).pack(padx=16, pady=(16, 8))
+
+        qr_img = qrcode.make(url).resize((260, 260))
+        photo = ImageTk.PhotoImage(qr_img)
+        qr_label = tk.Label(win, image=photo)
+        qr_label.image = photo  # GC 방지
+        qr_label.pack(padx=16)
+
+        tk.Label(win, text="같은 Wi-Fi에 연결된 폰에서 QR을 스캔하거나\n아래 주소를 브라우저에 입력하세요.",
+                 fg="#555555", justify="center").pack(padx=16, pady=8)
+
+        url_entry = tk.Entry(win, justify="center")
+        url_entry.insert(0, url)
+        url_entry.config(state="readonly")
+        url_entry.pack(fill="x", padx=16)
+
+        tk.Button(win, text="닫기", command=lambda: self._close_transfer_window(win)).pack(pady=16)
+
+    def _close_transfer_window(self, win: tk.Toplevel):
+        self._stop_transfer_server()
+        win.destroy()
+        self._transfer_window = None
+
+    def _stop_transfer_server(self):
+        if self._transfer_server is not None:
+            _log("폰 전송 서버 종료")
+            threading.Thread(target=self._transfer_server.shutdown, daemon=True).start()
+            self._transfer_server = None
 
     # ── 상태 머신 ─────────────────────────────────────────────
     def _set_state(self, state: str):
