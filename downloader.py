@@ -6,6 +6,7 @@ Python 3.x + tkinter + yt_dlp
 
 import sys
 import os
+import json
 import shutil
 import socket
 import queue
@@ -23,7 +24,7 @@ from typing import Optional, Dict
 import qrcode
 from PIL import ImageTk
 
-APP_VERSION = "1.9"
+APP_VERSION = "1.10"
 
 # console=False 빌드라 print()가 배포판에서 어디에도 안 남는 문제 대응 —
 # 파일 기반 로그로 대체. LOCALAPPDATA는 제한된 환경에서도 쓰기 권한이 보장됨.
@@ -73,6 +74,7 @@ if getattr(sys, "frozen", False):
 
 try:
     import yt_dlp
+    import yt_dlp.cookies
     _log(f"[DEBUG] yt_dlp import 성공: {yt_dlp.version.__version__}")
 except ImportError:
     messagebox.showerror(
@@ -94,6 +96,7 @@ class DownloadConfig:
     quality: str         # "192" | "320" | "1080" | "2160"
     save_dir: Path
     no_playlist: bool = True
+    cookie_file: Optional[str] = None
 
 
 # ─────────────────────────────────────────────
@@ -114,6 +117,68 @@ def _get_ffmpeg_path() -> Optional[str]:
             return exe_dir
     # 개발 환경: PATH에서 탐색 (None → yt-dlp가 PATH에서 찾음)
     return None
+
+
+# ─────────────────────────────────────────────
+# 쿠키 인증 (유튜브 봇 차단/PO 토큰 요구 우회용, v1.10)
+# ─────────────────────────────────────────────
+
+_cookie_browser_cache: Optional[str] = None
+
+
+def _pick_cookie_browser() -> Optional[str]:
+    """설치된 브라우저 중 쿠키 추출 가능한 첫 번째 브라우저 이름 반환. 실패 시 None(쿠키 없이 진행)."""
+    global _cookie_browser_cache
+    if _cookie_browser_cache is not None:
+        return _cookie_browser_cache or None
+    for browser in ("chrome", "edge", "whale", "firefox", "brave"):
+        try:
+            jar = yt_dlp.cookies.extract_cookies_from_browser(browser)
+            if len(jar) > 0:
+                _log(f"쿠키 브라우저 감지: {browser} ({len(jar)}개)")
+                _cookie_browser_cache = browser
+                return browser
+        except Exception as e:
+            _log(f"쿠키 추출 실패 ({browser}): {e}")
+    _cookie_browser_cache = ""
+    return None
+
+
+def _settings_path() -> Path:
+    base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+    return base / "settings.json"
+
+
+def _load_settings() -> dict:
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_settings(settings: dict) -> None:
+    try:
+        with open(_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        _log(f"설정 저장 실패: {e}")
+
+
+COOKIE_HELP_TEXT = (
+    "유튜브 로그인 쿠키 파일 사용법\n\n"
+    "1. 크롬 웹스토어에서 확장프로그램 설치\n"
+    '   검색: "Get cookies.txt LOCALLY"\n\n'
+    "2. 크롬으로 유튜브(youtube.com)에 로그인한 상태에서\n"
+    "   유튜브 페이지를 엽니다.\n\n"
+    "3. 확장프로그램 아이콘 클릭 → Export 버튼을 눌러\n"
+    "   cookies.txt 파일로 저장합니다.\n\n"
+    "4. 이 창의 '찾아보기' 버튼으로 방금 저장한\n"
+    "   cookies.txt 파일을 선택하세요.\n\n"
+    "한번 설정하면 계속 재사용되며, 브라우저를 켜두거나\n"
+    "꺼두거나 상관없이 항상 이 쿠키로 다운로드합니다.\n\n"
+    "쿠키가 만료되면(보통 수개월) 1~3번을 다시 반복하세요."
+)
 
 
 # ─────────────────────────────────────────────
@@ -224,6 +289,14 @@ class YtdlpRunner(threading.Thread):
             "no_warnings": False,
             "ignoreerrors": False,
         })
+
+        if cfg.cookie_file and os.path.exists(cfg.cookie_file):
+            opts["cookiefile"] = cfg.cookie_file
+            _log(f"쿠키 파일 사용: {cfg.cookie_file}")
+        else:
+            cookie_browser = _pick_cookie_browser()
+            if cookie_browser:
+                opts["cookiesfrombrowser"] = (cookie_browser,)
 
         _log(f"build_options: {opts}")
         return opts
@@ -347,7 +420,7 @@ class MainWindow:
         self.root = root
         self.root.title(f"YouTube Downloader v{APP_VERSION}")
         self.root.resizable(False, False)
-        self.root.geometry("600x430")
+        self.root.geometry("600x470")
 
         # 내부 상태
         self._state = self.STATE_IDLE
@@ -362,6 +435,9 @@ class MainWindow:
 
         # FFmpeg 체크
         self._ffmpeg_ok = self._check_ffmpeg()
+
+        # 저장된 쿠키 파일 경로 불러오기
+        self._settings = _load_settings()
 
         # UI 구성
         self._build_ui()
@@ -504,6 +580,23 @@ class MainWindow:
                                      command=self._on_browse)
         self.btn_browse.pack(side="left")
 
+        # ── 쿠키 파일 행 (유튜브 로그인 우회용) ──
+        cookie_frame = tk.Frame(content, bg="white")
+        cookie_frame.pack(fill="x", pady=4)
+        tk.Label(cookie_frame, text="쿠키 파일", width=8, anchor="w", bg="white",
+                 font=("Segoe UI", 9)).pack(side="left")
+        self.cookie_file_var = tk.StringVar(value=self._settings.get("cookie_file", ""))
+        cookie_entry = tk.Entry(cookie_frame, textvariable=self.cookie_file_var,
+                                font=("Segoe UI", 9), relief="solid", bd=1,
+                                state="readonly")
+        cookie_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.btn_cookie_browse = ttk.Button(cookie_frame, text="찾아보기", width=9,
+                                            command=self._on_cookie_browse)
+        self.btn_cookie_browse.pack(side="left", padx=(0, 4))
+        self.btn_cookie_help = ttk.Button(cookie_frame, text="사용법", width=7,
+                                          command=self._on_cookie_help)
+        self.btn_cookie_help.pack(side="left")
+
         # ── 버튼 행 ──
         btn_frame = tk.Frame(content, bg="white")
         btn_frame.pack(pady=8)
@@ -589,6 +682,20 @@ class MainWindow:
             self.save_dir_var.set(chosen)
             _log(f"저장 경로 변경: {chosen}")
 
+    def _on_cookie_browse(self):
+        chosen = filedialog.askopenfilename(
+            title="쿠키 파일 선택 (cookies.txt)",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if chosen:
+            self.cookie_file_var.set(chosen)
+            self._settings["cookie_file"] = chosen
+            _save_settings(self._settings)
+            _log(f"쿠키 파일 설정: {chosen}")
+
+    def _on_cookie_help(self):
+        messagebox.showinfo("쿠키 파일 사용법", COOKIE_HELP_TEXT)
+
     def _on_start(self):
         url = self.url_var.get().strip()
         if not url:
@@ -621,6 +728,7 @@ class MainWindow:
             quality=quality,
             save_dir=save_dir,
             no_playlist=no_playlist,
+            cookie_file=self.cookie_file_var.get().strip() or None,
         )
         _log(f"다운로드 시작 요청: {config}")
 
